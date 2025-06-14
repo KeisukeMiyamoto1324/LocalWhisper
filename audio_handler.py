@@ -1,6 +1,9 @@
+# audio_handler.py
+
 import sounddevice as sd
-import soundfile as sf
 import numpy as np
+# soundfileは不要になったため削除しました
+# import soundfile as sf 
 
 class AudioRecorder:
     def __init__(self, sample_rate=16000, channels=1):
@@ -13,13 +16,23 @@ class AudioRecorder:
         self.recording_data = []
         self.is_recording = True
         print("Recording started...")
-        with sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=self._callback):
-            while self.is_recording:
-                sd.sleep(100)
+        # InputStreamはスレッドで動作させるため、ここではループさせません
+        self.stream = sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=self._callback)
+        self.stream.start()
 
-    def stop_recording(self, output_filename="temp_recording.wav"):
+    def stop_recording(self):
+        """
+        録音を停止し、結合された音声データをNumPy配列として返す。
+        ファイルへの書き込みは行わない。
+        """
+        if not self.is_recording:
+            return None
+            
+        self.stream.stop()
+        self.stream.close()
         self.is_recording = False
         print("Recording stopped.")
+
         if not self.recording_data:
             print("No audio recorded.")
             return None
@@ -27,10 +40,8 @@ class AudioRecorder:
         # NumPy配列に変換
         recording_np = np.concatenate(self.recording_data, axis=0)
         
-        # .wavファイルとして保存
-        sf.write(output_filename, recording_np, self.sample_rate)
-        print(f"Recording saved to {output_filename}")
-        return output_filename
+        # Whisperが期待する1次元配列に変換して返す
+        return recording_np.flatten()
 
     def _callback(self, indata, frames, time, status):
         """InputStreamから呼ばれるコールバック関数"""

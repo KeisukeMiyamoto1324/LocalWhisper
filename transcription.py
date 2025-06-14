@@ -1,48 +1,36 @@
-# transcription.py (Corrected MLX version)
+# transcription.py
 
 import mlx_whisper
 import os
+import numpy as np # NumPyをインポート
 
 class TranscriptionService:
     def __init__(self, model_size="large-v3", **kwargs):
-        """
-        Initializes the TranscriptionService using MLX.
-        MLX is a framework from Apple optimized for Apple Silicon. It automatically
-        handles device placement (CPU/GPU) and uses optimized computation paths.
-
-        Args:
-            model_size (str): The name of the Whisper model to use.
-                              (e.g., "tiny.en", "base", "small", "medium", "large-v3")
-            **kwargs: Absorbs other arguments like 'device' and 'compute_type' for
-                      backward compatibility with how the class was called before,
-                      even though they are not used by MLX.
-        """
         self.model_size = model_size
+        # 引数を吸収するための**kwargsはそのままにしておきます
         print(f"TranscriptionService initialized with MLX.")
-        print(f"Using model: '{self.model_size}'. Model will be automatically downloaded and optimized on first use.")
+        print(f"Using model: '{self.model_size}'.")
 
-    def transcribe(self, audio_file_path):
+    def transcribe(self, audio_data: np.ndarray):
         """
-        Transcribes the given audio file using the whisper model on MLX.
+        与えられたNumPy配列の音声データを文字起こしする。
 
         Args:
-            audio_file_path (str): The path to the audio file to transcribe.
+            audio_data (np.ndarray): 文字起こしする音声データ。
 
         Returns:
-            str: The transcribed text.
+            str: 文字起こしされたテキスト。
         """
-        if not os.path.exists(audio_file_path):
-            print(f"Error: Audio file not found at {audio_file_path}")
-            return "Error: Audio file not found."
+        if audio_data is None or audio_data.size == 0:
+            print("Error: Audio data is empty.")
+            return "Error: No audio data to transcribe."
 
-        print(f"Transcribing {audio_file_path} with MLX model '{self.model_size}'...")
+        print(f"Transcribing audio data with MLX model '{self.model_size}'...")
 
         try:
-            # --- FIX ---
-            # The keyword argument for specifying the model is 'path_or_model', not 'model'.
-            # This was the cause of the error.
+            # audio引数にファイルパスの代わりにNumPy配列を渡す
             result = mlx_whisper.transcribe(
-                audio=audio_file_path,
+                audio=audio_data,
                 path_or_hf_repo="mlx-community/whisper-large-v3-turbo"
             )
 
@@ -59,5 +47,5 @@ class TranscriptionService:
 
 # --- Testing Block ---
 if __name__ == '__main__':
-    service = TranscriptionService(model_size="base.en")
+    # このテストブロックは直接実行しない限り動作しません
     pass
