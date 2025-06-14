@@ -14,6 +14,8 @@ from floating_ui import FloatingUIController
 import AppKit
 from PyObjCTools import AppHelper
 
+# ApplicationServicesはキー入力のシミュレーションには直接不要だが、
+# UI要素の取得のために残しておく
 try:
     from ApplicationServices import (
         AXUIElementCreateSystemWide,
@@ -62,7 +64,7 @@ class BackgroundRecorder:
                 return None
 
             err, role = AXUIElementCopyAttributeValue(focused_element, kAXRoleAttribute, None)
-            is_text_field = (err == kAXErrorSuccess and role in ["AXTextField", "AXTextArea"])
+            is_text_field = (err == kAXErrorSuccess and role in ["AXTextField", "AXTextArea", "AXSecureTextField"])
             if not is_text_field:
                  return None
 
@@ -95,7 +97,6 @@ class BackgroundRecorder:
             mouse_location = AppKit.NSEvent.mouseLocation()
             active_screen = AppKit.NSScreen.mainScreen()
             for screen in AppKit.NSScreen.screens():
-                # マウスカーソルがどの物理スクリーン上にあるかを判定
                 if AppKit.NSMouseInRect(mouse_location, screen.frame(), False):
                     active_screen = screen
                     break
@@ -107,10 +108,7 @@ class BackgroundRecorder:
                 return
 
             print("▶️ Recording started...")
-            # ▼▼▼ ここが修正箇所 ▼▼▼
-            # UIの位置計算には、物理的なフレームではなく「可視フレーム」を渡す
             self.ui_controller.show_at(bounds, active_screen.visibleFrame())
-            # ▲▲▲ ここまで ▲▲▲
             self.audio_recorder.start_recording()
         else:
             print("⏹️ Recording stopped. Starting transcription...")
@@ -118,8 +116,53 @@ class BackgroundRecorder:
             processing_thread = threading.Thread(target=self.process_recording)
             processing_thread.start()
 
+    # ▼▼▼ ここからが新しいメソッドです ▼▼▼
+    def paste_text_safely(self, text_to_paste):
+        """
+        現在のクリップボードの内容をバックアップ・復元しながら、安全にテキストをペーストする。
+        """
+        pasteboard = AppKit.NSPasteboard.generalPasteboard()
+        
+        # 1. 現在のクリップボードの内容を型情報と一緒にバックアップ
+        saved_items = []
+        try:
+            types = pasteboard.types()
+            if types:
+                for a_type in types:
+                    data = pasteboard.dataForType_(a_type)
+                    if data:
+                        saved_items.append({'type': a_type, 'data': data})
+            print("   ↳ Clipboard content backed up.")
+        except Exception as e:
+            print(f"   ↳ Warning: Could not back up clipboard content: {e}")
+
+        try:
+            # 2. 文字起こしテキストをクリップボードに設定
+            pasteboard.clearContents()
+            pasteboard.setString_forType_(text_to_paste, AppKit.NSStringPboardType)
+            
+            # 3. Command + V (ペースト) を実行
+            time.sleep(0.1) # OSがクリップボードを認識するのを待つ
+            with self.keyboard_controller.pressed(Key.cmd):
+                self.keyboard_controller.press('v')
+                self.keyboard_controller.release('v')
+            print("   ↳ Paste command sent.")
+
+        finally:
+            # 4. バックアップした内容をクリップボードに復元
+            # 処理の成功・失敗に関わらず、必ず実行される
+            try:
+                # ペースト処理が完了するのを少し待ってから復元する
+                time.sleep(0.1)
+                pasteboard.clearContents()
+                for item in saved_items:
+                    pasteboard.setData_forType_(item['data'], item['type'])
+                print("   ↳ Clipboard content restored.")
+            except Exception as e:
+                print(f"   ↳ Warning: Could not restore clipboard content: {e}")
+
     def process_recording(self):
-        """録音を停止し、文字起こしとタイピングを行う関数"""
+        """録音を停止し、文字起こしとテキスト設定を行う関数"""
         audio_data = self.audio_recorder.stop_recording()
 
         if audio_data is not None:
@@ -127,11 +170,13 @@ class BackgroundRecorder:
             print(f"   ↳ Transcription result: {transcribed_text}")
 
             if transcribed_text:
-                time.sleep(0.1)
-                self.keyboard_controller.type(" " + transcribed_text.strip())
-                print("   ↳ Text has been typed.")
+                final_text = " " + transcribed_text.strip()
+                
+                # 新しい安全なペーストメソッドをメインスレッドで呼び出す
+                AppHelper.callLater(0, self.paste_text_safely, final_text)
         else:
             print("   ↳ Recording data was too short; processing cancelled.")
+    # ▲▲▲ ここまでが変更箇所です ▲▲▲
 
     def run(self):
         """キーボードリスナーとUIイベントループを開始します"""

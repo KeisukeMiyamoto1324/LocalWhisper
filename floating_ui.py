@@ -79,9 +79,11 @@ class FloatingUIController:
         AppHelper.callLater(0, self.setup_window)
 
     def setup_window(self):
-        """ウィンドウとビューをシンプルなデザインでセットアップします。"""
+        """ウィンドウとビューを新しいデザインでセットアップします。"""
         win_rect = AppKit.NSMakeRect(0, 0, 220, 40) # UIに合わせてサイズを調整
 
+        # --- 変更点 1: ボーダーレスウィンドウの設定 ---
+        # 以前と同様にボーダーレスウィンドウを作成します
         self.window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             win_rect,
             AppKit.NSWindowStyleMaskBorderless,
@@ -89,22 +91,37 @@ class FloatingUIController:
             False
         )
 
-        # ウィンドウを透明にし、背景色をクリアに設定
+        # --- 変更点 2: ウィンドウの透明化と影の設定 ---
+        # ウィンドウ自体は透明のままにします。これにより、角丸の背景が正しく表示されます。
         self.window.setOpaque_(False)
         self.window.setBackgroundColor_(AppKit.NSColor.clearColor())
-        # 他のウィンドウより手前に表示
-        self.window.setLevel_(AppKit.NSStatusWindowLevel)
-        # マウスイベントを無視する
-        self.window.setIgnoresMouseEvents_(True)
-        # 全てのデスクトップスペースで表示
-        self.window.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
-        # シンプルなUIなので影はなしにする
-        self.window.setHasShadow_(False)
+        # 影を有効にします
+        self.window.setHasShadow_(True)
 
-        # --- 波形ビューを作成し、ウィンドウのコンテンツビューとして直接設定 ---
-        self.waveform_view = WaveformView.alloc().initWithFrame_(self.window.contentView().bounds())
+        # --- 変更点 3: コンテンツビューの作成と設定 ---
+        # コンテンツビューとなるカスタムビューを作成します。
+        # このビューが白色の背景と角丸を持ちます。
+        content_view = AppKit.NSView.alloc().initWithFrame_(self.window.contentView().bounds())
+        content_view.setWantsLayer_(True) # layerを有効にする
+        content_view.layer().setCornerRadius_(10.0) # 角丸の半径を設定 (10.0は例)
+        content_view.layer().setMasksToBounds_(True)
+        content_view.layer().setBackgroundColor_(AppKit.NSColor.whiteColor().CGColor())
+
+        # コンテンツビューのサイズがウィンドウに合わせて自動調整されるように設定
+        content_view.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
+        self.window.setContentView_(content_view)
+
+        # --- 変更点 4: 波形ビューをコンテンツビューの子ビューとして追加 ---
+        # 波形ビューを作成し、先ほど作成した白い背景のコンテンツビューに追加します。
+        self.waveform_view = WaveformView.alloc().initWithFrame_(content_view.bounds())
         self.waveform_view.setAutoresizingMask_(AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable)
-        self.window.setContentView_(self.waveform_view)
+        content_view.addSubview_(self.waveform_view)
+
+
+        # --- 既存のウィンドウ設定 ---
+        self.window.setLevel_(AppKit.NSStatusWindowLevel)
+        self.window.setIgnoresMouseEvents_(True)
+        self.window.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
 
 
     def show_at(self, bounds, screen_visible_frame):
