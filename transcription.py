@@ -1,65 +1,64 @@
-# transcription.py (faster-whisper版)
+# transcription.py (Corrected MLX version)
 
-from faster_whisper import WhisperModel
+import mlx_whisper
 import os
 
 class TranscriptionService:
-    def __init__(self, model_size="base.en", device="cpu", compute_type="int8"):
+    def __init__(self, model_size="large-v3", **kwargs):
         """
-        TranscriptionServiceを初期化します。
+        Initializes the TranscriptionService using MLX.
+        MLX is a framework from Apple optimized for Apple Silicon. It automatically
+        handles device placement (CPU/GPU) and uses optimized computation paths.
 
         Args:
-            model_size (str): 使用するWhisperモデルのサイズ。
-                              (例: "tiny.en", "base", "small", "medium", "large-v3")
-            device (str): 推論に使用するデバイス ("cpu", "cuda", "mps")。
-                          Apple Siliconでは"cpu"または"mps"が推奨されます。
-            compute_type (str): 計算に使用するデータ型 ("int8", "float16", "float32")。
-                                "int8"は速度とメモリ効率が良いです。
+            model_size (str): The name of the Whisper model to use.
+                              (e.g., "tiny.en", "base", "small", "medium", "large-v3")
+            **kwargs: Absorbs other arguments like 'device' and 'compute_type' for
+                      backward compatibility with how the class was called before,
+                      even though they are not used by MLX.
         """
-        # モデルがローカルにない場合、初回実行時に自動でダウンロードされます。
-        # ダウンロード先: ~/.cache/huggingface/hub/models--Systran--faster-whisper-*
-        print(f"Loading model: {model_size} ({compute_type}) on {device}...")
-        self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        print("Whisper model loaded.")
+        self.model_size = model_size
+        print(f"TranscriptionService initialized with MLX.")
+        print(f"Using model: '{self.model_size}'. Model will be automatically downloaded and optimized on first use.")
 
     def transcribe(self, audio_file_path):
         """
-        指定された音声ファイルを文字起こしします。
+        Transcribes the given audio file using the whisper model on MLX.
 
         Args:
-            audio_file_path (str): 文字起こしする音声ファイルのパス。
+            audio_file_path (str): The path to the audio file to transcribe.
 
         Returns:
-            str: 文字起こしされたテキスト全体。
+            str: The transcribed text.
         """
         if not os.path.exists(audio_file_path):
             print(f"Error: Audio file not found at {audio_file_path}")
             return "Error: Audio file not found."
+
+        print(f"Transcribing {audio_file_path} with MLX model '{self.model_size}'...")
+
+        try:
+            # --- FIX ---
+            # The keyword argument for specifying the model is 'path_or_model', not 'model'.
+            # This was the cause of the error.
+            result = mlx_whisper.transcribe(
+                audio=audio_file_path,
+                # path_or_model=self.model_size, # Corrected this line
+                # verbose=True
+            )
+
+            transcribed_text = result.get("text", "")
+            language = result.get("language", "unknown")
+
+            print(f"\nTranscription complete. Detected language: {language}")
             
-        print(f"Transcribing {audio_file_path}...")
-        
-        # faster-whisperは文字起こし結果をセグメントのイテレータとして返します。
-        # beam_size=5は推論の品質を向上させるための一般的な設定です。
-        segments, info = self.model.transcribe(audio_file_path, beam_size=5)
+            return transcribed_text.strip()
 
-        # 検出された言語と予想される文字起こしの長さを表示
-        print(f"Detected language '{info.language}' with probability {info.language_probability:.2f}")
-        print(f"Transcription duration: {info.duration:.2f} seconds")
+        except Exception as e:
+            print(f"\nAn error occurred during MLX transcription: {e}")
+            return "Error during transcription."
 
-        # 全てのセグメントを結合して一つのテキストにする
-        transcribed_text = "".join(segment.text for segment in segments)
-        
-        print("Transcription finished.")
-        # 余分なスペースを削除して返す
-        return transcribed_text.strip()
-
-# テスト用
+# --- Testing Block ---
 if __name__ == '__main__':
-    # M1/M2/M3 Macをお使いの場合、`compute_type`に`int8`を指定すると高速です。
-    # `device="mps"`も試す価値がありますが、CPUの方が速い場合もあります。
-    service = TranscriptionService(model_size="base.en", device="cpu", compute_type="int8")
-    
-    # ここにテストしたい音声ファイルのパスを記述してください。
-    # 例: text = service.transcribe("path/to/your/audio.wav")
-    # print("\n--- Transcription Result ---")
-    # print(text)
+    service = TranscriptionService(model_size="base.en")
+    pass
