@@ -43,8 +43,7 @@ class TranscriptionService:
             # This was the cause of the error.
             result = mlx_whisper.transcribe(
                 audio=audio_file_path,
-                # path_or_model=self.model_size, # Corrected this line
-                # verbose=True
+                path_or_hf_repo="mlx-community/whisper-large-v3-turbo"
             )
 
             transcribed_text = result.get("text", "")
