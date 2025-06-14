@@ -2,61 +2,86 @@
 
 import time
 import threading
+import queue
+import traceback
 from pynput import keyboard
 from pynput.keyboard import Key, Controller as KeyboardController
 
 from audio_handler import AudioRecorder
 from transcription import TranscriptionService
+from floating_ui import FloatingUIController
+
+import AppKit
+from PyObjCTools import AppHelper
 
 try:
-    from ApplicationServices import AXUIElementCreateSystemWide, AXUIElementCopyAttributeValue
+    from ApplicationServices import (
+        AXUIElementCreateSystemWide,
+        AXUIElementCopyAttributeValue,
+        AXValueGetValue,
+        kAXFocusedUIElementAttribute,
+        kAXRoleAttribute,
+        kAXPositionAttribute,
+        kAXSizeAttribute,
+        kAXValueCGPointType,
+        kAXValueCGSizeType
+    )
     from HIServices import kAXErrorSuccess
     PYOBJC_AVAILABLE = True
-except ImportError:
+except ImportError as e:
+    print(f"警告: 必要なmacOSライブラリがインポートできませんでした: {e}")
     PYOBJC_AVAILABLE = False
-    print("警告: PyObjCがインストールされていません。テキストボックスのフォーカスチェックは無効になります。")
-    print("       次のコマンドでインストールできます: pip3 install pyobjc")
 
 
 DOUBLE_TAP_THRESHOLD = 0.4
 
 class BackgroundRecorder:
     def __init__(self):
-        self.audio_recorder = AudioRecorder()
-        self.transcription_service = TranscriptionService(model_size="large-v3-turbo") # compute_typeはMLXでは不要
+        self.ui_queue = queue.Queue()
+        self.ui_controller = FloatingUIController(self.ui_queue)
+        
+        self.audio_recorder = AudioRecorder(ui_queue=self.ui_queue)
+        self.transcription_service = TranscriptionService(model_size="large-v3-turbo")
         self.keyboard_controller = KeyboardController()
         
         self.last_option_press_time = 0
-        # is_recordingの状態はAudioRecorderインスタンスが持つので、そちらを参照する
         
         print("--- バックグラウンド録音・文字起こしツール ---")
         print("Optionキーを2回素早く押して、録音を開始/停止します。")
         print("このプログラムを終了するには、ターミナルで Ctrl+C を押してください。")
-    
-    # is_focus_on_textboxメソッドは変更なし...
-    def is_focus_on_textbox(self):
+
+    def get_focused_element_bounds(self):
+        """現在フォーカスされているUI要素の位置とサイズを取得します"""
         if not PYOBJC_AVAILABLE:
-            return False
+            return None
+        
         try:
             system_wide_element = AXUIElementCreateSystemWide()
-            err, focused_element = AXUIElementCopyAttributeValue(
-                system_wide_element, "AXFocusedUIElement", None
-            )
+            err, focused_element = AXUIElementCopyAttributeValue(system_wide_element, kAXFocusedUIElementAttribute, None)
             if err != kAXErrorSuccess or not focused_element:
-                return False
+                return None
 
-            err, role = AXUIElementCopyAttributeValue(focused_element, "AXRole", None)
-            if err == kAXErrorSuccess and role in ["AXTextField", "AXTextArea"]:
-                return True
+            err, role = AXUIElementCopyAttributeValue(focused_element, kAXRoleAttribute, None)
+            is_text_field = (err == kAXErrorSuccess and role in ["AXTextField", "AXTextArea"])
+            if not is_text_field:
+                 return None
 
-            err, role_description = AXUIElementCopyAttributeValue(focused_element, "AXRoleDescription", None)
-            if err == kAXErrorSuccess and role_description:
-                if role_description.lower() in ["text area", "editor", "text editor"]:
-                    return True
-            
-            return False
-        except Exception:
-            return False
+            err_pos, pos_ref = AXUIElementCopyAttributeValue(focused_element, kAXPositionAttribute, None)
+            err_size, size_ref = AXUIElementCopyAttributeValue(focused_element, kAXSizeAttribute, None)
+
+            if err_pos == kAXErrorSuccess and err_size == kAXErrorSuccess and pos_ref and size_ref:
+                # --- ここが最後の修正点です ---
+                # 第三引数に `None` を追加します
+                success_pos, pos = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
+                success_size, size = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
+                if success_pos and success_size:
+                    return {'x': pos.x, 'y': pos.y, 'width': size.width, 'height': size.height}
+            return None
+
+        except Exception as e:
+            print(f"\n[エラー] UI要素の位置取得中に予期せぬ例外が発生しました: {e}")
+            traceback.print_exc()
+            return None
 
     def on_key_press(self, key):
         if key == Key.alt or key == Key.alt_r:
@@ -65,32 +90,30 @@ class BackgroundRecorder:
             self.last_option_press_time = current_time
 
             if time_diff < DOUBLE_TAP_THRESHOLD:
-                self.handle_double_tap()
+                AppHelper.callLater(0, self.handle_double_tap)
 
     def handle_double_tap(self):
         if not self.audio_recorder.is_recording:
-            if not self.is_focus_on_textbox():
-                if PYOBJC_AVAILABLE:
-                    print("ℹ️ Recording not started: Cursor is not in a text input field.")
-                else:
-                    print("ℹ️ Recording not started: Cannot check focus because PyObjC is not installed.")
+            bounds = self.get_focused_element_bounds()
+            if not bounds:
+                print("ℹ️ 録音を開始できませんでした。テキスト入力欄にカーソルを合わせてください。")
                 self.last_option_press_time = 0
                 return
 
             print("▶️ Recording started...")
+            self.ui_controller.show_at(bounds)
             self.audio_recorder.start_recording()
         else:
             print("⏹️ Recording stopped. Starting transcription...")
+            self.ui_controller.hide()
             processing_thread = threading.Thread(target=self.process_recording)
             processing_thread.start()
 
     def process_recording(self):
         """録音を停止し、文字起こしとタイピングを行う関数"""
-        # stop_recordingはファイルパスではなくNumpy配列を返す
         audio_data = self.audio_recorder.stop_recording()
 
         if audio_data is not None:
-            # transcribeメソッドにNumpy配列を渡す
             transcribed_text = self.transcription_service.transcribe(audio_data)
             print(f"   ↳ Transcription result: {transcribed_text}")
 
@@ -101,16 +124,15 @@ class BackgroundRecorder:
         else:
             print("   ↳ Recording data was too short; processing cancelled.")
 
-    def start_listener(self):
-        with keyboard.Listener(on_press=self.on_key_press) as listener:
-            try:
-                listener.join()
-            except KeyboardInterrupt:
-                print("\nExiting program.")
-                if self.audio_recorder.is_recording:
-                    self.audio_recorder.stop_recording()
-                listener.stop()
+    def run(self):
+        """キーボードリスナーとUIイベントループを開始します"""
+        listener = keyboard.Listener(on_press=self.on_key_press)
+        listener_thread = threading.Thread(target=listener.start, daemon=True)
+        listener_thread.start()
+        
+        AppKit.NSApplication.sharedApplication().run()
+
 
 if __name__ == '__main__':
-    recorder_app = BackgroundRecorder()
-    recorder_app.start_listener()
+    app = BackgroundRecorder()
+    app.run()

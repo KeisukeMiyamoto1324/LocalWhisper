@@ -6,11 +6,13 @@ import numpy as np
 # import soundfile as sf 
 
 class AudioRecorder:
-    def __init__(self, sample_rate=16000, channels=1):
+    def __init__(self, sample_rate=16000, channels=1, ui_queue=None):
         self.sample_rate = sample_rate
         self.channels = channels
         self.is_recording = False
         self.recording_data = []
+        # UIにデータを送るためのキューを追加
+        self.ui_queue = ui_queue
 
     def start_recording(self):
         self.recording_data = []
@@ -48,5 +50,10 @@ class AudioRecorder:
         if status:
             print(status)
         self.recording_data.append(indata.copy())
+        
+        # UIキューが存在すれば、音声データをキューに追加します
+        if self.ui_queue:
+            # 新しいデータをキューに入れます
+            self.ui_queue.put(indata.copy().flatten())
 
 # このファイルは直接実行せず、他のファイルから呼び出して使います。
