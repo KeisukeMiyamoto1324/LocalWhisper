@@ -14,19 +14,21 @@ from floating_ui import FloatingUIController
 import AppKit
 from PyObjCTools import AppHelper
 
-# ApplicationServicesはキー入力のシミュレーションには直接不要だが、
-# UI要素の取得のために残しておく
+# ▼▼▼ 変更点 1: 必要な定数をインポートリストに追加 ▼▼▼
 try:
     from ApplicationServices import (
         AXUIElementCreateSystemWide,
         AXUIElementCopyAttributeValue,
+        AXUIElementCopyParameterizedAttributeValue, # パラメータ付き属性を取得する関数
         AXValueGetValue,
         kAXFocusedUIElementAttribute,
-        kAXRoleAttribute,
-        kAXPositionAttribute,
-        kAXSizeAttribute,
-        kAXValueCGPointType,
-        kAXValueCGSizeType
+        kAXSelectedTextRangeAttribute,              # 選択されたテキスト範囲の属性
+        kAXBoundsForRangeParameterizedAttribute,    # 範囲の境界を取得するためのパラメータ付き属性
+        kAXPositionAttribute,                       # (フォールバック用に残す)
+        kAXSizeAttribute,                           # (フォールバック用に残す)
+        kAXValueCGPointType,                        # (フォールバック用に残す)
+        kAXValueCGSizeType,                         # (フォールバック用に残す)
+        kAXValueCGRectType                          # CGRect型の値を取得するために必要
     )
     from HIServices import kAXErrorSuccess
     PYOBJC_AVAILABLE = True
@@ -52,36 +54,60 @@ class BackgroundRecorder:
         print("Optionキーを2回素早く押して、録音を開始/停止します。")
         print("このプログラムを終了するには、ターミナルで Ctrl+C を押してください。")
 
-    def get_focused_element_bounds(self):
-        """現在フォーカスされているUI要素の位置とサイズを取得します"""
+    # ▼▼▼ 変更点 2: 新しい高精度なカーソル位置検出関数を実装 ▼▼▼
+    def get_caret_bounds(self):
+        """
+        Accessibility APIを使い、現在フォーカスされているUI要素の
+        テキストカーソル（キャレット）の正確な画面座標を取得する。
+        """
         if not PYOBJC_AVAILABLE:
             return None
         
         try:
+            # 1. システム全体でフォーカスされているUI要素を取得
             system_wide_element = AXUIElementCreateSystemWide()
-            err, focused_element = AXUIElementCopyAttributeValue(system_wide_element, kAXFocusedUIElementAttribute, None)
-            if err != kAXErrorSuccess or not focused_element:
+            err, focused_element_ref = AXUIElementCopyAttributeValue(system_wide_element, kAXFocusedUIElementAttribute, None)
+            if err != kAXErrorSuccess or not focused_element_ref:
                 return None
 
-            err, role = AXUIElementCopyAttributeValue(focused_element, kAXRoleAttribute, None)
-            is_text_field = (err == kAXErrorSuccess and role in ["AXTextField", "AXTextArea", "AXSecureTextField"])
-            if not is_text_field:
-                 return None
+            # 2. フォーカスされた要素の「選択されたテキスト範囲」を取得
+            #    カーソルがあるだけの場合、これは位置情報を持つ「長さゼロの範囲」となる
+            err, selected_range_ref = AXUIElementCopyAttributeValue(focused_element_ref, kAXSelectedTextRangeAttribute, None)
+            if err != kAXErrorSuccess or not selected_range_ref:
+                return None
 
-            err_pos, pos_ref = AXUIElementCopyAttributeValue(focused_element, kAXPositionAttribute, None)
-            err_size, size_ref = AXUIElementCopyAttributeValue(focused_element, kAXSizeAttribute, None)
+            # 3.「範囲の境界」を取得するためのパラメータ化された属性を使って、カーソルの具体的な画面座標を要求
+            #    これがSwiftプロジェクトで使われていた核心的な技術
+            err, bounds_for_range_ref = AXUIElementCopyParameterizedAttributeValue(
+                focused_element_ref,
+                kAXBoundsForRangeParameterizedAttribute,
+                selected_range_ref,
+                None
+            )
+            if err != kAXErrorSuccess or not bounds_for_range_ref:
+                return None
 
-            if err_pos == kAXErrorSuccess and err_size == kAXErrorSuccess and pos_ref and size_ref:
-                success_pos, pos = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
-                success_size, size = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
-                if success_pos and success_size:
-                    return {'x': pos.x, 'y': pos.y, 'width': size.width, 'height': size.height}
-            return None
+            # 4. 取得したAXValueからCGRect（座標とサイズ）を抽出
+            success, rect_value = AXValueGetValue(bounds_for_range_ref, kAXValueCGRectType, None)
+            if not success:
+                return None
+            
+            # 5. フローティングUIが扱える辞書形式で座標を返す
+            #    注意: ここで得られる Y 座標は画面の上端が原点 (Top-Left)
+            print(f"  ↳ Caret found at: [x={rect_value.origin.x}, y={rect_value.origin.y}]")
+            return {
+                'x': rect_value.origin.x,
+                'y': rect_value.origin.y,
+                'width': rect_value.size.width,
+                'height': rect_value.size.height
+            }
 
         except Exception as e:
-            print(f"\n[エラー] UI要素の位置取得中に予期せぬ例外が発生しました: {e}")
+            print(f"\n[エラー] カーソル位置の検出中に予期せぬ例外が発生しました: {e}")
             traceback.print_exc()
             return None
+
+    # (以前の get_editable_text_input_bounds 関数は不要になったため削除)
 
     def on_key_press(self, key):
         if key == Key.alt or key == Key.alt_r:
@@ -101,9 +127,11 @@ class BackgroundRecorder:
                     active_screen = screen
                     break
             
-            bounds = self.get_focused_element_bounds()
+            # ▼▼▼ 変更点 3: 新しい検出関数を呼び出すように変更 ▼▼▼
+            bounds = self.get_caret_bounds()
+            
             if not bounds:
-                print("ℹ️ 録音を開始できませんでした。テキスト入力欄にカーソルを合わせてください。")
+                print("ℹ️ 録音を開始できませんでした。編集可能なテキスト入力欄にカーソルを合わせてください。")
                 self.last_option_press_time = 0
                 return
 
@@ -116,14 +144,11 @@ class BackgroundRecorder:
             processing_thread = threading.Thread(target=self.process_recording)
             processing_thread.start()
 
-    # ▼▼▼ ここからが新しいメソッドです ▼▼▼
     def paste_text_safely(self, text_to_paste):
         """
         現在のクリップボードの内容をバックアップ・復元しながら、安全にテキストをペーストする。
         """
         pasteboard = AppKit.NSPasteboard.generalPasteboard()
-        
-        # 1. 現在のクリップボードの内容を型情報と一緒にバックアップ
         saved_items = []
         try:
             types = pasteboard.types()
@@ -132,34 +157,28 @@ class BackgroundRecorder:
                     data = pasteboard.dataForType_(a_type)
                     if data:
                         saved_items.append({'type': a_type, 'data': data})
-            print("   ↳ Clipboard content backed up.")
+            print("   ↳ Clipboard content backed up.")
         except Exception as e:
-            print(f"   ↳ Warning: Could not back up clipboard content: {e}")
+            print(f"   ↳ Warning: Could not back up clipboard content: {e}")
 
         try:
-            # 2. 文字起こしテキストをクリップボードに設定
             pasteboard.clearContents()
             pasteboard.setString_forType_(text_to_paste, AppKit.NSStringPboardType)
-            
-            # 3. Command + V (ペースト) を実行
-            time.sleep(0.1) # OSがクリップボードを認識するのを待つ
+            time.sleep(0.1)
             with self.keyboard_controller.pressed(Key.cmd):
                 self.keyboard_controller.press('v')
                 self.keyboard_controller.release('v')
-            print("   ↳ Paste command sent.")
+            print("   ↳ Paste command sent.")
 
         finally:
-            # 4. バックアップした内容をクリップボードに復元
-            # 処理の成功・失敗に関わらず、必ず実行される
             try:
-                # ペースト処理が完了するのを少し待ってから復元する
                 time.sleep(0.1)
                 pasteboard.clearContents()
                 for item in saved_items:
                     pasteboard.setData_forType_(item['data'], item['type'])
-                print("   ↳ Clipboard content restored.")
+                print("   ↳ Clipboard content restored.")
             except Exception as e:
-                print(f"   ↳ Warning: Could not restore clipboard content: {e}")
+                print(f"   ↳ Warning: Could not restore clipboard content: {e}")
 
     def process_recording(self):
         """録音を停止し、文字起こしとテキスト設定を行う関数"""
@@ -167,16 +186,13 @@ class BackgroundRecorder:
 
         if audio_data is not None:
             transcribed_text = self.transcription_service.transcribe(audio_data)
-            print(f"   ↳ Transcription result: {transcribed_text}")
+            print(f"   ↳ Transcription result: {transcribed_text}")
 
             if transcribed_text:
                 final_text = " " + transcribed_text.strip()
-                
-                # 新しい安全なペーストメソッドをメインスレッドで呼び出す
                 AppHelper.callLater(0, self.paste_text_safely, final_text)
         else:
-            print("   ↳ Recording data was too short; processing cancelled.")
-    # ▲▲▲ ここまでが変更箇所です ▲▲▲
+            print("   ↳ Recording data was too short; processing cancelled.")
 
     def run(self):
         """キーボードリスナーとUIイベントループを開始します"""
