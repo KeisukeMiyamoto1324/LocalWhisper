@@ -2,8 +2,8 @@
 
 import sounddevice as sd
 import numpy as np
-# soundfileは不要になったため削除しました
-# import soundfile as sf 
+import queue # Import the queue module
+import sys
 
 class AudioRecorder:
     def __init__(self, sample_rate=16000, channels=1):
@@ -11,19 +11,22 @@ class AudioRecorder:
         self.channels = channels
         self.is_recording = False
         self.recording_data = []
+        self.waveform_queue = None # Add a placeholder for the queue
 
-    def start_recording(self):
+    def start_recording(self, waveform_queue: queue.Queue = None):
+        """
+        Starts recording and optionally sends audio chunks to a queue for live visualization.
+        """
         self.recording_data = []
         self.is_recording = True
+        self.waveform_queue = waveform_queue # Store the queue
         print("Recording started...")
-        # InputStreamはスレッドで動作させるため、ここではループさせません
         self.stream = sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=self._callback)
         self.stream.start()
 
     def stop_recording(self):
         """
-        録音を停止し、結合された音声データをNumPy配列として返す。
-        ファイルへの書き込みは行わない。
+        Stops recording and returns the combined audio data as a NumPy array.
         """
         if not self.is_recording:
             return None
@@ -31,22 +34,28 @@ class AudioRecorder:
         self.stream.stop()
         self.stream.close()
         self.is_recording = False
+        self.waveform_queue = None # Clear the queue reference
         print("Recording stopped.")
 
         if not self.recording_data:
             print("No audio recorded.")
             return None
         
-        # NumPy配列に変換
         recording_np = np.concatenate(self.recording_data, axis=0)
         
-        # Whisperが期待する1次元配列に変換して返す
         return recording_np.flatten()
 
     def _callback(self, indata, frames, time, status):
-        """InputStreamから呼ばれるコールバック関数"""
+        """InputStream callback. Appends data for storage and pushes to the waveform queue."""
         if status:
-            print(status)
+            print(status, file=sys.stderr)
         self.recording_data.append(indata.copy())
-
-# このファイルは直接実行せず、他のファイルから呼び出して使います。
+        
+        # If a queue is provided, put the latest audio chunk into it.
+        # Use put_nowait to avoid blocking the audio thread if the queue is full.
+        if self.waveform_queue:
+            try:
+                # We send a flattened copy of the data
+                self.waveform_queue.put_nowait(indata.copy().flatten())
+            except queue.Full:
+                pass # Ignore if the UI can't keep up
