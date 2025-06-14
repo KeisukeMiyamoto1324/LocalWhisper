@@ -70,8 +70,6 @@ class BackgroundRecorder:
             err_size, size_ref = AXUIElementCopyAttributeValue(focused_element, kAXSizeAttribute, None)
 
             if err_pos == kAXErrorSuccess and err_size == kAXErrorSuccess and pos_ref and size_ref:
-                # --- ここが最後の修正点です ---
-                # 第三引数に `None` を追加します
                 success_pos, pos = AXValueGetValue(pos_ref, kAXValueCGPointType, None)
                 success_size, size = AXValueGetValue(size_ref, kAXValueCGSizeType, None)
                 if success_pos and success_size:
@@ -94,6 +92,14 @@ class BackgroundRecorder:
 
     def handle_double_tap(self):
         if not self.audio_recorder.is_recording:
+            mouse_location = AppKit.NSEvent.mouseLocation()
+            active_screen = AppKit.NSScreen.mainScreen()
+            for screen in AppKit.NSScreen.screens():
+                # マウスカーソルがどの物理スクリーン上にあるかを判定
+                if AppKit.NSMouseInRect(mouse_location, screen.frame(), False):
+                    active_screen = screen
+                    break
+            
             bounds = self.get_focused_element_bounds()
             if not bounds:
                 print("ℹ️ 録音を開始できませんでした。テキスト入力欄にカーソルを合わせてください。")
@@ -101,7 +107,10 @@ class BackgroundRecorder:
                 return
 
             print("▶️ Recording started...")
-            self.ui_controller.show_at(bounds)
+            # ▼▼▼ ここが修正箇所 ▼▼▼
+            # UIの位置計算には、物理的なフレームではなく「可視フレーム」を渡す
+            self.ui_controller.show_at(bounds, active_screen.visibleFrame())
+            # ▲▲▲ ここまで ▲▲▲
             self.audio_recorder.start_recording()
         else:
             print("⏹️ Recording stopped. Starting transcription...")
@@ -115,14 +124,14 @@ class BackgroundRecorder:
 
         if audio_data is not None:
             transcribed_text = self.transcription_service.transcribe(audio_data)
-            print(f"   ↳ Transcription result: {transcribed_text}")
+            print(f"   ↳ Transcription result: {transcribed_text}")
 
             if transcribed_text:
                 time.sleep(0.1)
                 self.keyboard_controller.type(" " + transcribed_text.strip())
-                print("   ↳ Text has been typed.")
+                print("   ↳ Text has been typed.")
         else:
-            print("   ↳ Recording data was too short; processing cancelled.")
+            print("   ↳ Recording data was too short; processing cancelled.")
 
     def run(self):
         """キーボードリスナーとUIイベントループを開始します"""
