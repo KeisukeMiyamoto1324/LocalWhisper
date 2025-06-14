@@ -2,58 +2,58 @@
 
 import sounddevice as sd
 import numpy as np
-# soundfileは不要になったため削除しました
-# import soundfile as sf 
+import queue
 
 class AudioRecorder:
-    def __init__(self, sample_rate=16000, channels=1, ui_queue=None):
+    def __init__(self, sample_rate=16000, channels=1, ui_queue=None, transcription_queue=None):
         self.sample_rate = sample_rate
         self.channels = channels
         self.is_recording = False
-        self.recording_data = []
-        # UIにデータを送るためのキューを追加
+        
         self.ui_queue = ui_queue
+        self.transcription_queue = transcription_queue
+        
+        # チャンク間隔を短くし、よりスムーズにデータを送る
+        self.chunk_duration_seconds = 1  # 1秒ごとにチャンクを生成
+        self.chunk_frames = int(self.sample_rate * self.chunk_duration_seconds)
+        self.transcription_buffer = []
 
     def start_recording(self):
-        self.recording_data = []
+        self.transcription_buffer = []
         self.is_recording = True
-        print("Recording started...")
-        # InputStreamはスレッドで動作させるため、ここではループさせません
+        print("Streaming recording started...")
         self.stream = sd.InputStream(samplerate=self.sample_rate, channels=self.channels, callback=self._callback)
         self.stream.start()
 
     def stop_recording(self):
-        """
-        録音を停止し、結合された音声データをNumPy配列として返す。
-        ファイルへの書き込みは行わない。
-        """
         if not self.is_recording:
-            return None
+            return
             
         self.stream.stop()
         self.stream.close()
         self.is_recording = False
-        print("Recording stopped.")
+        print("Streaming recording stopped.")
 
-        if not self.recording_data:
-            print("No audio recorded.")
-            return None
-        
-        # NumPy配列に変換
-        recording_np = np.concatenate(self.recording_data, axis=0)
-        
-        # Whisperが期待する1次元配列に変換して返す
-        return recording_np.flatten()
+        if self.transcription_buffer:
+            final_chunk = np.concatenate(self.transcription_buffer)
+            if self.transcription_queue:
+                self.transcription_queue.put(final_chunk.flatten())
+            self.transcription_buffer = []
 
     def _callback(self, indata, frames, time, status):
-        """InputStreamから呼ばれるコールバック関数"""
         if status:
             print(status)
-        self.recording_data.append(indata.copy())
         
-        # UIキューが存在すれば、音声データをキューに追加します
         if self.ui_queue:
-            # 新しいデータをキューに入れます
             self.ui_queue.put(indata.copy().flatten())
+            
+        self.transcription_buffer.append(indata.copy())
+        
+        buffered_frames = sum(len(chunk) for chunk in self.transcription_buffer)
 
-# このファイルは直接実行せず、他のファイルから呼び出して使います。
+        if buffered_frames >= self.chunk_frames:
+            chunk_to_process = np.concatenate(self.transcription_buffer)
+            self.transcription_buffer = []
+            
+            if self.transcription_queue:
+                self.transcription_queue.put(chunk_to_process.flatten())
