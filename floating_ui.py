@@ -20,15 +20,14 @@ class ModernWaveformView(AppKit.NSView):
             self.smoothed_data = np.zeros(32, dtype=np.float32)
             self.peak_level = 0.01
             self.animation_phase = 0.0
-            
+
             # 色の設定
             self.setup_colors()
-            
+
         return self
 
     def setup_colors(self):
         """色の設定"""
-        # システムカラーを使用してより確実な色設定
         self.primary_color = AppKit.NSColor.systemBlueColor()
         self.secondary_color = AppKit.NSColor.systemGrayColor()
         self.inactive_color = AppKit.NSColor.tertiaryLabelColor()
@@ -37,64 +36,63 @@ class ModernWaveformView(AppKit.NSView):
         """波形データの更新"""
         if data is None or len(data) == 0:
             return
-            
+
         # RMS値を計算
         rms = float(np.sqrt(np.mean(data**2)))
-        
+
         # データをシフトして新しい値を追加
         self.waveform_data = np.roll(self.waveform_data, -1)
         self.waveform_data[-1] = rms
-        
+
         # スムージング
         self.smoothed_data = self.smoothed_data * 0.6 + self.waveform_data * 0.4
-        
+
         # ピークレベルの更新
         current_max = np.max(self.smoothed_data)
         if current_max > self.peak_level:
             self.peak_level = current_max
         else:
             self.peak_level = max(0.01, self.peak_level * 0.95)
-        
+
         # アニメーション位相の更新
         self.animation_phase += 0.15
         if self.animation_phase > 2 * math.pi:
             self.animation_phase = 0.0
-        
+
         # 再描画を要求
         self.setNeedsDisplay_(True)
 
     def drawRect_(self, dirtyRect):
         """波形の描画"""
-        # 描画コンテキストをクリア
         AppKit.NSColor.clearColor().set()
         AppKit.NSRectFill(dirtyRect)
-        
+
         bounds = self.bounds()
         width = bounds.size.width
         height = bounds.size.height
         center_y = height / 2.0
-        
+
         if not hasattr(self, 'smoothed_data') or len(self.smoothed_data) == 0:
             return
-        
+
         # バーの設定
         num_bars = len(self.smoothed_data)
         spacing = 2.0
         bar_width = max(1.0, (width - spacing * (num_bars - 1)) / num_bars)
-        
+
         # 各バーを描画
         for i, value in enumerate(self.smoothed_data):
             x_pos = i * (bar_width + spacing)
-            
+
             # バーの高さを計算
             normalized_value = value / self.peak_level if self.peak_level > 0 else 0
             bar_height = max(2.0, normalized_value * height * 0.8)
-            
+
             # 微細なアニメーション効果
             if normalized_value > 0.1:
                 wave_effect = math.sin(self.animation_phase + i * 0.2) * 1.0
                 bar_height += wave_effect
-            
+
             # バーの矩形を作成
             bar_rect = AppKit.NSMakeRect(
                 x_pos,
@@ -102,7 +100,7 @@ class ModernWaveformView(AppKit.NSView):
                 bar_width,
                 bar_height
             )
-            
+
             # 色を選択（値に応じて）
             if normalized_value > 0.3:
                 color = self.primary_color.colorWithAlphaComponent_(0.8)
@@ -110,7 +108,7 @@ class ModernWaveformView(AppKit.NSView):
                 color = self.secondary_color.colorWithAlphaComponent_(0.6)
             else:
                 color = self.inactive_color.colorWithAlphaComponent_(0.4)
-            
+
             # バーを描画
             color.set()
             path = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
@@ -121,24 +119,29 @@ class ModernWaveformView(AppKit.NSView):
 
 class FloatingUIController:
     """
-    シンプルで確実に動作するフローティングUI
+    リアルタイム文字起こし結果表示機能付きフローティングUI
     """
     def __init__(self, data_queue):
         self.data_queue = data_queue
         self.window = None
         self.waveform_view = None
+        self.text_view = None
         self.timer = None
-        
+
+        # リアルタイム文字起こし用
+        self.transcription_text = ""
+        self.text_queue = queue.Queue()
+
         print("FloatingUIController: 初期化中...")
         AppHelper.callLater(0, self.setup_window)
 
     def setup_window(self):
         """ウィンドウの作成とセットアップ"""
         print("FloatingUIController: ウィンドウをセットアップ中...")
-        
-        # ウィンドウサイズ
-        window_width = 240
-        window_height = 50
+
+        # ウィンドウサイズを大きくしてテキスト表示領域を確保
+        window_width = 320
+        window_height = 120
         win_rect = AppKit.NSMakeRect(0, 0, window_width, window_height)
 
         # ボーダーレスウィンドウを作成
@@ -162,75 +165,140 @@ class FloatingUIController:
 
         # コンテンツビューの作成
         self.setup_content_view()
-        
+
         print("FloatingUIController: ウィンドウセットアップ完了")
 
     def setup_content_view(self):
         """コンテンツビューのセットアップ"""
         bounds = self.window.contentView().bounds()
-        
+
         # メインコンテナビューを作成
         container_view = AppKit.NSView.alloc().initWithFrame_(bounds)
         container_view.setWantsLayer_(True)
-        
+
         # 背景レイヤーの設定
         layer = container_view.layer()
         layer.setCornerRadius_(12.0)
         layer.setMasksToBounds_(True)
-        
-        # 背景色（半透明の白または黒）
+
+        # 背景色設定
         try:
-            # macOS 10.14以降のダークモード対応
             if hasattr(AppKit.NSApp, 'effectiveAppearance'):
                 appearance = AppKit.NSApp.effectiveAppearance()
                 is_dark = 'Dark' in str(appearance.name())
             else:
                 is_dark = False
-                
+
             if is_dark:
-                bg_color = AppKit.NSColor.blackColor().colorWithAlphaComponent_(0.8)
+                bg_color = AppKit.NSColor.blackColor().colorWithAlphaComponent_(0.85)
             else:
-                bg_color = AppKit.NSColor.whiteColor().colorWithAlphaComponent_(0.9)
+                bg_color = AppKit.NSColor.whiteColor().colorWithAlphaComponent_(0.92)
         except:
-            # フォールバック
-            bg_color = AppKit.NSColor.whiteColor().colorWithAlphaComponent_(0.9)
-        
+            bg_color = AppKit.NSColor.whiteColor().colorWithAlphaComponent_(0.92)
+
         layer.setBackgroundColor_(bg_color.CGColor())
-        
+
         # 境界線の追加
         layer.setBorderWidth_(0.5)
         border_color = AppKit.NSColor.separatorColor().colorWithAlphaComponent_(0.3)
         layer.setBorderColor_(border_color.CGColor())
-        
+
         # ウィンドウにコンテナビューを設定
         self.window.setContentView_(container_view)
-        
-        # 波形ビューを作成
+
+        # 波形ビューとテキストビューを作成
         self.setup_waveform_view(container_view)
+        self.setup_text_view(container_view)
 
     def setup_waveform_view(self, container_view):
         """波形ビューのセットアップ"""
         bounds = container_view.bounds()
-        
-        # パディングを追加
+
+        # 波形ビューは上部に配置
         padding = 8.0
+        waveform_height = 40.0
         waveform_rect = AppKit.NSMakeRect(
             padding,
-            padding,
+            bounds.size.height - waveform_height - padding,
             bounds.size.width - 2 * padding,
-            bounds.size.height - 2 * padding
+            waveform_height
         )
-        
+
         # 波形ビューを作成
         self.waveform_view = ModernWaveformView.alloc().initWithFrame_(waveform_rect)
         self.waveform_view.setAutoresizingMask_(
-            AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+            AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
         )
-        
+
         # コンテナビューに追加
         container_view.addSubview_(self.waveform_view)
-        
-        print("FloatingUIController: 波形ビューセットアップ完了")
+
+    def setup_text_view(self, container_view):
+        """テキスト表示ビューのセットアップ"""
+        bounds = container_view.bounds()
+
+        # テキストビューは下部に配置
+        padding = 8.0
+        text_height = 60.0
+        text_rect = AppKit.NSMakeRect(
+            padding,
+            padding,
+            bounds.size.width - 2 * padding,
+            text_height
+        )
+
+        # スクロールビューを作成
+        scroll_view = AppKit.NSScrollView.alloc().initWithFrame_(text_rect)
+        scroll_view.setHasVerticalScroller_(False)
+        scroll_view.setHasHorizontalScroller_(False)
+        scroll_view.setBorderType_(AppKit.NSNoBorder)
+        scroll_view.setAutoresizingMask_(
+            AppKit.NSViewWidthSizable | AppKit.NSViewMaxYMargin
+        )
+
+        # テキストビューを作成
+        text_view_rect = AppKit.NSMakeRect(0, 0, text_rect.size.width, text_rect.size.height)
+        self.text_view = AppKit.NSTextView.alloc().initWithFrame_(text_view_rect)
+        self.text_view.setEditable_(False)
+        self.text_view.setSelectable_(True)
+        self.text_view.setRichText_(True)
+        self.text_view.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self.text_view.setTextContainerInset_(AppKit.NSMakeSize(4, 4))
+
+        # フォントと色の設定
+        font = AppKit.NSFont.systemFontOfSize_(12.0)
+        self.text_view.setFont_(font)
+
+        try:
+            if hasattr(AppKit.NSApp, 'effectiveAppearance'):
+                appearance = AppKit.NSApp.effectiveAppearance()
+                is_dark = 'Dark' in str(appearance.name())
+            else:
+                is_dark = False
+
+            if is_dark:
+                text_color = AppKit.NSColor.whiteColor()
+            else:
+                text_color = AppKit.NSColor.blackColor()
+        except:
+            text_color = AppKit.NSColor.blackColor()
+
+        self.text_view.setTextColor_(text_color)
+
+        # スクロールビューにテキストビューを設定
+        scroll_view.setDocumentView_(self.text_view)
+
+        # コンテナビューに追加
+        container_view.addSubview_(scroll_view)
+
+        print("FloatingUIController: テキストビューセットアップ完了")
+
+    def update_transcription_text(self, text):
+        """リアルタイム文字起こしテキストの更新"""
+        try:
+            self.text_queue.put(text)
+        except Exception as e:
+            print(f"FloatingUIController: テキスト更新エラー - {e}")
 
     def show_at(self, bounds, screen_visible_frame):
         """指定位置にウィンドウを表示"""
@@ -254,7 +322,7 @@ class FloatingUIController:
         textbox_top_on_screen = bounds_y_bottom_up - screen_origin.y
         preferred_y_on_screen = textbox_top_on_screen + margin
         preferred_y = screen_origin.y + preferred_y_on_screen
-        
+
         if preferred_y + window_size.height > screen_origin.y + screen_size.height:
             textbox_bottom_on_screen = textbox_top_on_screen - bounds['height']
             y = screen_origin.y + textbox_bottom_on_screen - window_size.height - margin
@@ -273,7 +341,7 @@ class FloatingUIController:
         # ウィンドウを表示
         self.window.setFrameOrigin_(AppKit.NSPoint(x, y))
         self.window.makeKeyAndOrderFront_(None)
-        
+
         # タイマーを開始
         self.start_updating()
         print("FloatingUIController: ウィンドウ表示完了")
@@ -282,10 +350,14 @@ class FloatingUIController:
         """ウィンドウを非表示"""
         if not self.window:
             return
-            
+
         print("FloatingUIController: ウィンドウを非表示")
         self.stop_updating()
         self.window.orderOut_(None)
+
+        # テキストをクリア
+        if self.text_view:
+            self.text_view.setString_("")
 
     def start_updating(self):
         """更新タイマーを開始"""
@@ -303,23 +375,25 @@ class FloatingUIController:
             self.timer = None
 
     def update_(self, timer):
-        """データキューから音声データを取得して波形を更新"""
+        """データキューから音声データとテキストを取得して更新"""
         try:
+            # 音声データの更新
             data_updated = False
             while not self.data_queue.empty():
                 data = self.data_queue.get_nowait()
                 if self.waveform_view and data is not None:
                     self.waveform_view.update_waveform(data)
                     data_updated = True
-            
-            # デバッグ情報（必要に応じて）
-            # if data_updated:
-            #     print("FloatingUIController: 波形データ更新")
-                
+
+            # テキストの更新
+            text_updated = False
+            while not self.text_queue.empty():
+                text = self.text_queue.get_nowait()
+                if self.text_view and text is not None:
+                    self.text_view.setString_(text)
+                    text_updated = True
+
         except queue.Empty:
             pass
         except Exception as e:
             print(f"FloatingUIController: 更新エラー - {e}")
-            
-            
-            
