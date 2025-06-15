@@ -9,21 +9,26 @@ from pynput.keyboard import Key, Controller as KeyboardController
 
 from audio_handler import AudioRecorder
 from transcription import TranscriptionService
-from floating_ui import FloatingUIController # 修正されたUIをインポート
+from floating_ui import FloatingUIController
 
 import AppKit
 from PyObjCTools import AppHelper
 
+# ▼▼▼ 変更点 1: 必要な定数をインポートリストに追加 ▼▼▼
 try:
     from ApplicationServices import (
         AXUIElementCreateSystemWide,
         AXUIElementCopyAttributeValue,
-        AXUIElementCopyParameterizedAttributeValue,
+        AXUIElementCopyParameterizedAttributeValue, # パラメータ付き属性を取得する関数
         AXValueGetValue,
         kAXFocusedUIElementAttribute,
-        kAXSelectedTextRangeAttribute,
-        kAXBoundsForRangeParameterizedAttribute,
-        kAXValueCGRectType
+        kAXSelectedTextRangeAttribute,              # 選択されたテキスト範囲の属性
+        kAXBoundsForRangeParameterizedAttribute,    # 範囲の境界を取得するためのパラメータ付き属性
+        kAXPositionAttribute,                       # (フォールバック用に残す)
+        kAXSizeAttribute,                           # (フォールバック用に残す)
+        kAXValueCGPointType,                        # (フォールバック用に残す)
+        kAXValueCGSizeType,                         # (フォールバック用に残す)
+        kAXValueCGRectType                          # CGRect型の値を取得するために必要
     )
     from HIServices import kAXErrorSuccess
     PYOBJC_AVAILABLE = True
@@ -36,42 +41,43 @@ DOUBLE_TAP_THRESHOLD = 0.4
 
 class BackgroundRecorder:
     def __init__(self):
-        # ▼▼▼ 変更点 1: キューを2つ作成 ▼▼▼
-        self.waveform_ui_queue = queue.Queue() # 波形表示用
-        self.transcription_to_ui_queue = queue.Queue() # 文字起こしテキスト表示用
-
-        # ▼▼▼ 変更点 2: 各コンポーネントを新しいキューで初期化 ▼▼▼
-        self.transcription_service = TranscriptionService(
-            model_size="large-v3-turbo", 
-            ui_queue=self.transcription_to_ui_queue
-        )
-        self.ui_controller = FloatingUIController(
-            self.waveform_ui_queue, 
-            self.transcription_to_ui_queue
-        )
-        self.audio_recorder = AudioRecorder(
-            ui_queue=self.waveform_ui_queue, 
-            transcription_service=self.transcription_service
-        )
+        self.ui_queue = queue.Queue()
+        self.ui_controller = FloatingUIController(self.ui_queue)
         
+        self.audio_recorder = AudioRecorder(ui_queue=self.ui_queue)
+        self.transcription_service = TranscriptionService(model_size="large-v3-turbo")
         self.keyboard_controller = KeyboardController()
+        
         self.last_option_press_time = 0
         
-        print("--- バックグラウンド録音・文字起こしツール (ストリーミング対応版) ---")
+        print("--- バックグラウンド録音・文字起こしツール ---")
         print("Optionキーを2回素早く押して、録音を開始/停止します。")
         print("このプログラムを終了するには、ターミナルで Ctrl+C を押してください。")
 
+    # ▼▼▼ 変更点 2: 新しい高精度なカーソル位置検出関数を実装 ▼▼▼
     def get_caret_bounds(self):
+        """
+        Accessibility APIを使い、現在フォーカスされているUI要素の
+        テキストカーソル（キャレット）の正確な画面座標を取得する。
+        """
         if not PYOBJC_AVAILABLE:
             return None
+        
         try:
+            # 1. システム全体でフォーカスされているUI要素を取得
             system_wide_element = AXUIElementCreateSystemWide()
             err, focused_element_ref = AXUIElementCopyAttributeValue(system_wide_element, kAXFocusedUIElementAttribute, None)
             if err != kAXErrorSuccess or not focused_element_ref:
                 return None
+
+            # 2. フォーカスされた要素の「選択されたテキスト範囲」を取得
+            #    カーソルがあるだけの場合、これは位置情報を持つ「長さゼロの範囲」となる
             err, selected_range_ref = AXUIElementCopyAttributeValue(focused_element_ref, kAXSelectedTextRangeAttribute, None)
             if err != kAXErrorSuccess or not selected_range_ref:
                 return None
+
+            # 3.「範囲の境界」を取得するためのパラメータ化された属性を使って、カーソルの具体的な画面座標を要求
+            #    これがSwiftプロジェクトで使われていた核心的な技術
             err, bounds_for_range_ref = AXUIElementCopyParameterizedAttributeValue(
                 focused_element_ref,
                 kAXBoundsForRangeParameterizedAttribute,
@@ -80,21 +86,28 @@ class BackgroundRecorder:
             )
             if err != kAXErrorSuccess or not bounds_for_range_ref:
                 return None
+
+            # 4. 取得したAXValueからCGRect（座標とサイズ）を抽出
             success, rect_value = AXValueGetValue(bounds_for_range_ref, kAXValueCGRectType, None)
             if not success:
                 return None
             
-            print(f" ↳ Caret found at: [x={rect_value.origin.x}, y={rect_value.origin.y}]")
+            # 5. フローティングUIが扱える辞書形式で座標を返す
+            #    注意: ここで得られる Y 座標は画面の上端が原点 (Top-Left)
+            print(f"  ↳ Caret found at: [x={rect_value.origin.x}, y={rect_value.origin.y}]")
             return {
                 'x': rect_value.origin.x,
                 'y': rect_value.origin.y,
                 'width': rect_value.size.width,
                 'height': rect_value.size.height
             }
+
         except Exception as e:
             print(f"\n[エラー] カーソル位置の検出中に予期せぬ例外が発生しました: {e}")
             traceback.print_exc()
             return None
+
+    # (以前の get_editable_text_input_bounds 関数は不要になったため削除)
 
     def on_key_press(self, key):
         if key == Key.alt or key == Key.alt_r:
@@ -114,6 +127,7 @@ class BackgroundRecorder:
                     active_screen = screen
                     break
             
+            # ▼▼▼ 変更点 3: 新しい検出関数を呼び出すように変更 ▼▼▼
             bounds = self.get_caret_bounds()
             
             if not bounds:
@@ -123,13 +137,10 @@ class BackgroundRecorder:
 
             print("▶️ Recording started...")
             self.ui_controller.show_at(bounds, active_screen.visibleFrame())
-            # ▼▼▼ 変更点 3: ストリーミング処理を開始 ▼▼▼
-            self.transcription_service.start_stream()
             self.audio_recorder.start_recording()
         else:
-            print("⏹️ Recording stopped. Finalizing transcription...")
+            print("⏹️ Recording stopped. Starting transcription...")
             self.ui_controller.hide()
-            # ▼▼▼ 変更点 4: 録音停止と最終処理をバックグラウンドで実行 ▼▼▼
             processing_thread = threading.Thread(target=self.process_recording)
             processing_thread.start()
 
@@ -170,19 +181,18 @@ class BackgroundRecorder:
                 print(f"   ↳ Warning: Could not restore clipboard content: {e}")
 
     def process_recording(self):
-        """
-        録音を停止し、最終的な文字起こし結果を取得してテキストをペーストする。
-        """
-        # ▼▼▼ 変更点 5: ストリーミングを停止し、最終テキストを取得 ▼▼▼
-        self.audio_recorder.stop_recording() # まずはマイク入力を止める
-        transcribed_text = self.transcription_service.stop_stream()
+        """録音を停止し、文字起こしとテキスト設定を行う関数"""
+        audio_data = self.audio_recorder.stop_recording()
 
-        if transcribed_text:
-            print(f"   ↳ Final transcription result: {transcribed_text}")
-            final_text = " " + transcribed_text.strip()
-            AppHelper.callLater(0, self.paste_text_safely, final_text)
+        if audio_data is not None:
+            transcribed_text = self.transcription_service.transcribe(audio_data)
+            print(f"   ↳ Transcription result: {transcribed_text}")
+
+            if transcribed_text:
+                final_text = " " + transcribed_text.strip()
+                AppHelper.callLater(0, self.paste_text_safely, final_text)
         else:
-            print("   ↳ Recording was empty or transcription failed; nothing to paste.")
+            print("   ↳ Recording data was too short; processing cancelled.")
 
     def run(self):
         """キーボードリスナーとUIイベントループを開始します"""
