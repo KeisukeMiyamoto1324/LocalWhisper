@@ -127,7 +127,10 @@ class FloatingUIController:
         self.data_queue = data_queue
         self.window = None
         self.waveform_view = None
+        self.progress_view = None
+        self.status_label = None
         self.timer = None
+        self.is_processing = False
         
         print("FloatingUIController: 初期化中...")
         AppHelper.callLater(0, self.setup_window)
@@ -207,6 +210,9 @@ class FloatingUIController:
         
         # 波形ビューを作成
         self.setup_waveform_view(container_view)
+        
+        # プログレスビューとステータスラベルを作成
+        self.setup_progress_view(container_view)
 
     def setup_waveform_view(self, container_view):
         """波形ビューのセットアップ"""
@@ -231,6 +237,50 @@ class FloatingUIController:
         container_view.addSubview_(self.waveform_view)
         
         print("FloatingUIController: 波形ビューセットアップ完了")
+
+    def setup_progress_view(self, container_view):
+        """プログレスビューとステータスラベルのセットアップ"""
+        bounds = container_view.bounds()
+        padding = 8.0
+        
+        # ステータスラベル
+        label_height = 16.0
+        status_rect = AppKit.NSMakeRect(
+            padding,
+            bounds.size.height - padding - label_height,
+            bounds.size.width - 2 * padding,
+            label_height
+        )
+        
+        self.status_label = AppKit.NSTextField.alloc().initWithFrame_(status_rect)
+        self.status_label.setBordered_(False)
+        self.status_label.setDrawsBackground_(False)
+        self.status_label.setEditable_(False)
+        self.status_label.setSelectable_(False)
+        self.status_label.setAlignment_(AppKit.NSTextAlignmentCenter)
+        self.status_label.setFont_(AppKit.NSFont.systemFontOfSize_(11))
+        self.status_label.setTextColor_(AppKit.NSColor.secondaryLabelColor())
+        self.status_label.setStringValue_("Transcribing...")
+        self.status_label.setHidden_(True)
+        container_view.addSubview_(self.status_label)
+        
+        # プログレスビュー
+        progress_height = 4.0
+        progress_rect = AppKit.NSMakeRect(
+            padding,
+            bounds.size.height - padding - label_height - 4 - progress_height,
+            bounds.size.width - 2 * padding,
+            progress_height
+        )
+        
+        self.progress_view = AppKit.NSProgressIndicator.alloc().initWithFrame_(progress_rect)
+        self.progress_view.setStyle_(AppKit.NSProgressIndicatorStyleBar)
+        self.progress_view.setIndeterminate_(True)
+        self.progress_view.setDisplayedWhenStopped_(False)
+        self.progress_view.setHidden_(True)
+        container_view.addSubview_(self.progress_view)
+        
+        print("FloatingUIController: プログレスビューセットアップ完了")
 
     def show_at(self, bounds, screen_visible_frame):
         """指定位置にウィンドウを表示"""
@@ -278,6 +328,25 @@ class FloatingUIController:
         self.start_updating()
         print("FloatingUIController: ウィンドウ表示完了")
 
+    def show_processing(self):
+        """文字起こし処理中の表示に切り替え"""
+        if not self.window:
+            return
+            
+        print("FloatingUIController: 文字起こし処理中表示に切り替え")
+        self.is_processing = True
+        
+        # 波形ビューを非表示にしてプログレスビューを表示
+        if self.waveform_view:
+            self.waveform_view.setHidden_(True)
+        
+        if self.progress_view:
+            self.progress_view.setHidden_(False)
+            self.progress_view.startAnimation_(None)
+            
+        if self.status_label:
+            self.status_label.setHidden_(False)
+    
     def hide(self):
         """ウィンドウを非表示"""
         if not self.window:
@@ -285,6 +354,20 @@ class FloatingUIController:
             
         print("FloatingUIController: ウィンドウを非表示")
         self.stop_updating()
+        
+        # プログレス表示を停止
+        if self.progress_view:
+            self.progress_view.stopAnimation_(None)
+            self.progress_view.setHidden_(True)
+            
+        if self.status_label:
+            self.status_label.setHidden_(True)
+            
+        # 波形ビューを再表示（次回の録音のため）
+        if self.waveform_view:
+            self.waveform_view.setHidden_(False)
+            
+        self.is_processing = False
         self.window.orderOut_(None)
 
     def start_updating(self):

@@ -140,7 +140,8 @@ class BackgroundRecorder:
             self.audio_recorder.start_recording()
         else:
             print("⏹️ Recording stopped. Starting transcription...")
-            self.ui_controller.hide()
+            # UIを文字起こし処理中の表示に変更（非表示にしない）
+            self.ui_controller.show_processing()
             processing_thread = threading.Thread(target=self.process_recording)
             processing_thread.start()
 
@@ -179,6 +180,12 @@ class BackgroundRecorder:
                 print("   ↳ Clipboard content restored.")
             except Exception as e:
                 print(f"   ↳ Warning: Could not restore clipboard content: {e}")
+    
+    def paste_text_and_hide_ui(self, text_to_paste):
+        """テキストをペーストした後にUIを非表示にする"""
+        self.paste_text_safely(text_to_paste)
+        # ペースト処理の後、少し待ってからUIを非表示にする
+        AppHelper.callLater(0.1, self.ui_controller.hide)
 
     def process_recording(self):
         """録音を停止し、文字起こしとテキスト設定を行う関数"""
@@ -190,9 +197,14 @@ class BackgroundRecorder:
 
             if transcribed_text:
                 final_text = " " + transcribed_text.strip()
-                AppHelper.callLater(0, self.paste_text_safely, final_text)
+                AppHelper.callLater(0, self.paste_text_and_hide_ui, final_text)
+            else:
+                # 文字起こし結果が空の場合はUIを非表示にする
+                AppHelper.callLater(0, self.ui_controller.hide)
         else:
             print("   ↳ Recording data was too short; processing cancelled.")
+            # 録音データが短すぎる場合はUIを非表示にする
+            AppHelper.callLater(0, self.ui_controller.hide)
 
     def run(self):
         """キーボードリスナーとUIイベントループを開始します"""
